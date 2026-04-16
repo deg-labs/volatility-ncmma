@@ -8,10 +8,31 @@ services:
       - ./ncmma/logs:/app/logs
       - ./ncmma/cache:/app/cache
       - ./ncmma/data:/app/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import json, os, sys
+          from datetime import datetime, timedelta
+          heartbeat_path = "/app/cache/heartbeat.json"
+          if not os.path.exists(heartbeat_path):
+              sys.exit(1)
+          with open(heartbeat_path, encoding="utf-8") as f:
+              heartbeat = json.load(f)
+          ts = datetime.fromisoformat(heartbeat["timestamp"])
+          grace = max(int(os.getenv("CHECK_INTERVAL_SECONDS", "300")) * 2, 120)
+          if heartbeat.get("status") == "error":
+              sys.exit(1)
+          sys.exit(0 if datetime.now() - ts <= timedelta(seconds=grace) else 1)
+      interval: 1m
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     restart: always
     logging:
       driver: json-file
       options:
         max-size: "5m"
         max-file: "2"
-
