@@ -26,6 +26,7 @@ class CmmaPriceMonitor:
         self.config_path = config_path or self.script_dir / '.env'
         self.log_dir = self.script_dir / 'logs'
         self.cache_dir = self.script_dir / 'cache'
+        self.heartbeat_path = self.cache_dir / 'heartbeat.json'
         
         # ディレクトリの作成
         self.log_dir.mkdir(exist_ok=True)
@@ -126,6 +127,18 @@ class CmmaPriceMonitor:
         self.logger.addHandler(file_handler)
         self.logger.addHandler(console_handler)
         self.logger.propagate = False
+
+    def _write_heartbeat(self, status, extra=None):
+        """ヘルスチェック用のheartbeatファイルを更新"""
+        payload = {
+            'status': status,
+            'timestamp': datetime.now().isoformat(),
+        }
+        if extra:
+            payload.update(extra)
+
+        with open(self.heartbeat_path, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, ensure_ascii=False)
     
     def _cleanup_logs(self):
         """ログディレクトリの自動削除（10MB以上）"""
@@ -471,6 +484,7 @@ class CmmaPriceMonitor:
     def monitor_volatility(self):
         """CMMA APIをチェックして閾値以上の変動がある銘柄を検出・通知"""
         start_time = datetime.now()
+        self._write_heartbeat('running')
         
         self.logger.info(f"Starting CMMA API monitoring job")
         self.logger.info(f"Settings: timeframe={self.timeframe}, threshold={self.threshold}%, direction={self.direction}")
@@ -524,6 +538,11 @@ class CmmaPriceMonitor:
                 self.logger.warning("Discord notification failed or all tokens were filtered")
         else:
             self.logger.info("No tokens found meeting criteria")
+
+        self._write_heartbeat('healthy', {
+            'execution_time_seconds': execution_time.total_seconds(),
+            'tokens_found': len(significant_moves),
+        })
         
         return significant_moves
     
@@ -560,9 +579,15 @@ def main():
         config_path = sys.argv[1] if len(sys.argv) > 1 else None
         
         monitor = CmmaPriceMonitor(config_path)
+        monitor._write_heartbeat('starting')
         
         while True:
-            significant_moves = monitor.monitor_volatility()
+            try:
+                significant_moves = monitor.monitor_volatility()
+            except Exception as exc:
+                monitor.logger.exception("Monitoring loop failed")
+                monitor._write_heartbeat('error', {'error': str(exc)})
+                raise
             
             # 結果出力
             if significant_moves:
