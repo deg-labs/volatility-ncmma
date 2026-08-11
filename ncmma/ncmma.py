@@ -138,8 +138,19 @@ class CmmaPriceMonitor:
         if extra:
             payload.update(extra)
 
-        with open(self.heartbeat_path, 'w', encoding='utf-8') as f:
-            json.dump(payload, f, ensure_ascii=False)
+        # 一時ファイルへの書き込み + os.replace でアトミックに更新し、
+        # 読み取り側が部分書き込み・破損JSONを検出しないようにする
+        tmp_path = self.heartbeat_path.with_suffix('.json.tmp')
+        try:
+            with open(tmp_path, 'w', encoding='utf-8') as f:
+                json.dump(payload, f, ensure_ascii=False)
+            os.replace(tmp_path, self.heartbeat_path)
+        except Exception:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise
     
     def _cleanup_logs(self):
         """ログディレクトリの自動削除（10MB以上）"""
