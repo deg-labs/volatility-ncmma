@@ -251,8 +251,11 @@ class CmmaPriceMonitor:
             response.raise_for_status()
             
             data = response.json()
-            if 'data' in data and data['count'] > 0:
-                self.logger.info(f"Successfully fetched {data['count']} records from CMMA API.")
+            if not isinstance(data, dict):
+                self.logger.warning("API returned a non-object response.")
+                return []
+            if 'data' in data and data.get('count', 0) > 0:
+                self.logger.info(f"Successfully fetched {data.get('count')} records from CMMA API.")
                 return data['data']
             elif 'error' in data:
                 self.logger.error(f"API Error from CMMA: {data['error']}")
@@ -290,9 +293,16 @@ class CmmaPriceMonitor:
             response.raise_for_status()
 
             data = response.json()
+            if not isinstance(data, dict):
+                self.logger.warning("Volume API returned a non-object response.")
+                return {}
             if 'data' in data:
                 self.logger.info(f"Successfully fetched {len(data['data'])} high volume symbols.")
-                return {item['symbol']: item for item in data['data']}
+                result = {}
+                for item in data['data']:
+                    if isinstance(item, dict) and item.get('symbol'):
+                        result[item['symbol']] = item
+                return result
             elif 'error' in data:
                 self.logger.error(f"API Error from CMMA volume endpoint: {data['error']}")
                 return {}
@@ -335,6 +345,33 @@ class CmmaPriceMonitor:
 
         return f"{num:.2f}{suffixes[magnitude]}$"
 
+    @staticmethod
+    def _extract_change(token):
+        """API応答のtokenからchange情報を安全に取得する。構造が不正ならNoneを返す。"""
+        if not isinstance(token, dict):
+            return None
+        change = token.get('change')
+        if not isinstance(change, dict):
+            return None
+        direction = change.get('direction')
+        if direction not in ('up', 'down', 'both'):
+            return None
+        try:
+            pct = float(change.get('pct'))
+        except (TypeError, ValueError):
+            return None
+        return (pct, direction)
+
+    @staticmethod
+    def _extract_price(token):
+        """API応答のtokenからprice情報を安全に取得する。構造が不正ならNoneを返す。"""
+        if not isinstance(token, dict):
+            return None
+        price = token.get('price')
+        if not isinstance(price, dict):
+            return None
+        return price
+
     def send_discord_notification(self, token_data):
         """Discordに通知を送信（重複チェック付き）"""
         if not token_data:
@@ -343,9 +380,16 @@ class CmmaPriceMonitor:
         # 重複チェック済みのトークンのみを通知
         filtered_tokens = []
         for token in token_data:
-            change_pct = token['change']['pct']
-            direction = token['change']['direction']
-            notification_hash = self._generate_notification_hash(token['symbol'], direction)
+            change = self._extract_change(token)
+            if change is None:
+                self.logger.warning("Skipping token with invalid change data: %s", token)
+                continue
+            _, direction = change
+            symbol = token.get('symbol')
+            if not symbol:
+                self.logger.warning("Skipping token without symbol: %s", token)
+                continue
+            notification_hash = self._generate_notification_hash(symbol, direction)
             
             if self._should_notify(notification_hash):
                 filtered_tokens.append((token, notification_hash))
@@ -383,17 +427,29 @@ class CmmaPriceMonitor:
             embed["footer"]["text"] += f" | 出来高(Turnover)({self.volume_period}): >{formatted_vol_threshold}"
 
         for token, _ in limited_tokens_with_hash:
-            change_pct = token['change']['pct']
-            direction_char = "📈" if token['change']['direction'] == 'up' else "📉"
-            sign = "+" if token['change']['direction'] == 'up' else ""
+            change = self._extract_change(token)
+            if change is None:
+                continue
+            change_pct, direction = change
+            price = self._extract_price(token)
+            if price is None:
+                continue
+            try:
+                close = float(price.get('close'))
+                prev_close = float(price.get('prev_close'))
+            except (TypeError, ValueError):
+                self.logger.warning("Skipping token with invalid price data: %s", token)
+                continue
+            direction_char = "📈" if direction == 'up' else "📉"
+            sign = "+" if direction == 'up' else ""
 
-            value = f"**{sign}{change_pct:.2f}%**\n`{token['price']['prev_close']:.6f}` → `{token['price']['close']:.6f}`"
+            value = f"**{sign}{change_pct:.2f}%**\n`{prev_close:.6f}` → `{close:.6f}`"
             if 'turnover' in token and token['turnover'] is not None:
                 formatted_turnover = self._format_currency(token['turnover'])
                 value += f"\nTurnover: `{formatted_turnover}`"
 
             embed["fields"].append({
-                "name": f"{direction_char} {token['symbol']}",
+                "name": f"{direction_char} {token.get('symbol', 'UNKNOWN')}",
                 "value": value,
                 "inline": True
             })
@@ -422,12 +478,16 @@ class CmmaPriceMonitor:
 
             # 通知が成功したトークンの履歴をDBに記録
             for token, notification_hash in limited_tokens_with_hash:
+                change = self._extract_change(token)
+                if change is None:
+                    continue
+                change_pct, direction = change
                 self._record_notification(
                     notification_hash,
-                    token['symbol'],
+                    token.get('symbol', ''),
                     self.timeframe,
-                    token['change']['direction'],
-                    token['change']['pct']
+                    direction,
+                    change_pct
                 )
             self.logger.info(f"Recorded {len(limited_tokens_with_hash)} notifications to database.")
             return True
@@ -515,7 +575,10 @@ class CmmaPriceMonitor:
             if high_volume_data:
                 filtered_moves = []
                 for token in significant_moves:
-                    symbol = token['symbol']
+                    symbol = token.get('symbol')
+                    if not symbol:
+                        self.logger.warning("Skipping token without symbol: %s", token)
+                        continue
                     # 出来高データにシンボルが存在するかチェック
                     if symbol in high_volume_data:
                         # 出来高の値をtokenに追加
@@ -607,8 +670,12 @@ def main():
                 # 上位5件を表示
                 print("Top moving tokens:")
                 for i, token in enumerate(significant_moves[:5], 1):
-                    sign = "+" if token['change']['direction'] == 'up' else ""
-                    print(f"  {i}. {token['symbol']}: {sign}{token['change']['pct']:.2f}%")
+                    change = monitor._extract_change(token)
+                    if change is None:
+                        continue
+                    pct, direction = change
+                    sign = "+" if direction == 'up' else ""
+                    print(f"  {i}. {token.get('symbol', 'UNKNOWN')}: {sign}{pct:.2f}%")
             else:
                 print(f"INFO: No tokens found meeting criteria")
             
