@@ -182,8 +182,15 @@ class CmmaPriceMonitor:
                 pass
             raise
     
+    @staticmethod
+    def _is_managed_log(file_path):
+        """自前命名規則に一致するファイルかを判定する。
+        削除対象は ncmma_monitor.log (ローテーションを含む) と results_*.json に限定する。"""
+        name = file_path.name
+        return name.startswith('ncmma_monitor.log') or name.startswith('results_')
+
     def _cleanup_logs(self):
-        """ログディレクトリの自動削除（10MB以上）"""
+        """ログディレクトリの自動削除（10MB以上）。削除対象は自前命名規則のファイルのみ。"""
         try:
             total_size = 0
             log_files = []
@@ -193,7 +200,8 @@ class CmmaPriceMonitor:
                 if file_path.is_file():
                     size = file_path.stat().st_size
                     total_size += size
-                    log_files.append((file_path, size, file_path.stat().st_mtime))
+                    if self._is_managed_log(file_path):
+                        log_files.append((file_path, size, file_path.stat().st_mtime))
             
             total_size_mb = total_size / (1024 * 1024)
             self.logger.info(f"Total log directory size: {total_size_mb:.2f}MB")
@@ -210,8 +218,7 @@ class CmmaPriceMonitor:
                 
                 for file_path, size, mtime in log_files:
                     # 現在のログファイルとメインログは削除しない
-                    if (file_path.name == 'ncmma_monitor.log' or 
-                        file_path.name.startswith('ncmma_monitor.log.')):
+                    if file_path.name == 'ncmma_monitor.log':
                         continue
                     
                     try:
@@ -558,10 +565,15 @@ class CmmaPriceMonitor:
             if deleted_results > 0:
                 self.logger.info(f"Cleaned up {deleted_results} old result files")
             
-            # ログディレクトリサイズチェック
-            total_size = sum(
-                f.stat().st_size for f in self.log_dir.rglob('*') if f.is_file()
-            )
+            # ログディレクトリサイズチェック (削除対象は自前命名規則のファイルのみ)
+            total_size = 0
+            deletable_files = []
+            for file_path in self.log_dir.rglob('*'):
+                if not file_path.is_file():
+                    continue
+                total_size += file_path.stat().st_size
+                if self._is_managed_log(file_path):
+                    deletable_files.append(file_path)
             total_size_mb = total_size / (1024 * 1024)
             
             if total_size_mb > self.log_max_size_mb:
@@ -569,9 +581,11 @@ class CmmaPriceMonitor:
                 
                 # ファイルを古い順にソート
                 files_by_age = []
-                for file_path in self.log_dir.rglob('*'):
-                    if file_path.is_file() and not file_path.name.endswith('.log'):  # 現在のログファイルは除外
+                for file_path in deletable_files:
+                    try:
                         files_by_age.append((file_path, file_path.stat().st_mtime, file_path.stat().st_size))
+                    except Exception as e:
+                        self.logger.warning(f"Failed to stat {file_path.name}: {e}")
                 
                 files_by_age.sort(key=lambda x: x[1])  # 古い順
                 
