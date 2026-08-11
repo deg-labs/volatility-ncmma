@@ -46,6 +46,36 @@ class CmmaPriceMonitor:
         if not self.discord_webhook_url:
             raise ValueError("DISCORD_WEBHOOK_URL not found in environment variables")
     
+    @staticmethod
+    def _get_env(key, default):
+        """環境変数を安全に取得する。未設定・空文字はデフォルト値を返す。"""
+        raw = os.getenv(key)
+        if raw is None or raw.strip() == '':
+            return default
+        return raw
+
+    @staticmethod
+    def _get_env_int(key, default):
+        """環境変数をintへ変換する。設定ミス・不正値はデフォルト値へフォールバック。"""
+        raw = os.getenv(key)
+        if raw is None or raw.strip() == '':
+            return default
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _get_env_float(key, default):
+        """環境変数をfloatへ変換する。設定ミス・不正値はデフォルト値へフォールバック。"""
+        raw = os.getenv(key)
+        if raw is None or raw.strip() == '':
+            return default
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return default
+
     def _load_config(self):
         """設定ファイルの読み込み"""
         if self.config_path.exists():
@@ -54,31 +84,31 @@ class CmmaPriceMonitor:
             load_dotenv()
         
         self.discord_webhook_url = os.getenv('DISCORD_WEBHOOK_URL')
-        self.volatility_api_url = os.getenv('CMMA_VOLATILITY_API_URL', 'https://stg.api.1btc.love/volatility')
+        self.volatility_api_url = self._get_env('CMMA_VOLATILITY_API_URL', 'https://stg.api.1btc.love/volatility')
         
         # APIクエリパラメータ
-        self.timeframe = os.getenv('TIMEFRAME', '4h')
-        self.threshold = float(os.getenv('THRESHOLD', '5.0'))
-        self.direction = os.getenv('DIRECTION', 'up')
-        self.volatility_sort = os.getenv('CMMA_VOLATILITY_API_SORT', 'volatility_desc')
-        self.volatility_limit = int(os.getenv('CMMA_VOLATILITY_API_LIMIT', '100'))
-        self.offset = int(os.getenv('OFFSET', '5'))
+        self.timeframe = self._get_env('TIMEFRAME', '4h')
+        self.threshold = self._get_env_float('THRESHOLD', 5.0)
+        self.direction = self._get_env('DIRECTION', 'up')
+        self.volatility_sort = self._get_env('CMMA_VOLATILITY_API_SORT', 'volatility_desc')
+        self.volatility_limit = self._get_env_int('CMMA_VOLATILITY_API_LIMIT', 100)
+        self.offset = self._get_env_int('OFFSET', 5)
 
         # 監視設定
-        self.max_notifications = int(os.getenv('MAX_NOTIFICATIONS', '20'))
-        self.renotify_buffer_minutes = int(os.getenv('RENOTIFY_BUFFER_MINUTES', '60'))
-        self.check_interval_seconds = int(os.getenv('CHECK_INTERVAL_SECONDS', '300'))
+        self.max_notifications = self._get_env_int('MAX_NOTIFICATIONS', 20)
+        self.renotify_buffer_minutes = self._get_env_int('RENOTIFY_BUFFER_MINUTES', 60)
+        self.check_interval_seconds = self._get_env_int('CHECK_INTERVAL_SECONDS', 300)
         
         # ログ設定
-        self.log_max_size_mb = int(os.getenv('LOG_MAX_SIZE_MB', '10'))
+        self.log_max_size_mb = self._get_env_int('LOG_MAX_SIZE_MB', 10)
 
         # 出来高フィルター設定
-        self.volume_api_url = os.getenv('CMMA_VOLUME_API_URL', 'https://stg.api.1btc.love/volume')
-        self.volume_threshold = float(os.getenv('VOLUME_THRESHOLD', '0.0'))
-        self.volume_timeframe = os.getenv('VOLUME_TIMEFRAME', '1h')
-        self.volume_period = os.getenv('VOLUME_PERIOD', '24h')
-        self.volume_sort = os.getenv('CMMA_VOLUME_API_SORT', 'turnover_desc')
-        self.volume_limit = int(os.getenv('CMMA_VOLUME_API_LIMIT', '100'))
+        self.volume_api_url = self._get_env('CMMA_VOLUME_API_URL', 'https://stg.api.1btc.love/volume')
+        self.volume_threshold = self._get_env_float('VOLUME_THRESHOLD', 0.0)
+        self.volume_timeframe = self._get_env('VOLUME_TIMEFRAME', '1h')
+        self.volume_period = self._get_env('VOLUME_PERIOD', '24h')
+        self.volume_sort = self._get_env('CMMA_VOLUME_API_SORT', 'turnover_desc')
+        self.volume_limit = self._get_env_int('CMMA_VOLUME_API_LIMIT', 100)
 
     def _init_db(self):
         """データベースの初期化"""
