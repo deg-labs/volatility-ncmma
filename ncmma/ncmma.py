@@ -11,6 +11,7 @@ import json
 import time
 import sys
 import os
+import math
 import hashlib
 import sqlite3
 from datetime import datetime, timedelta
@@ -313,16 +314,26 @@ class CmmaPriceMonitor:
         """数値をK, M, B, Tの単位を持つドル表記文字列にフォーマットする"""
         if num is None:
             return "N/A"
-        num = float(num)
-        if num < 1000:
+        try:
+            num = float(num)
+        except (TypeError, ValueError):
+            return "N/A"
+        # NaN/Infはループが終了せず、例外で監視・通知が停止するため有限値のみ処理する
+        if not math.isfinite(num):
+            return f"{num:.2f}$"
+        if abs(num) < 1000:
             return f"{num:,.2f}$"
-        
+
+        suffixes = ['', 'K', 'M', 'B', 'T']
         magnitude = 0
         while abs(num) >= 1000:
             magnitude += 1
             num /= 1000.0
-        
-        return f"{num:.2f}{['', 'K', 'M', 'B', 'T'][magnitude]}$"
+
+        # 巨大値でmagnitudeがリストの範囲を超えないようクランプ
+        magnitude = min(magnitude, len(suffixes) - 1)
+
+        return f"{num:.2f}{suffixes[magnitude]}$"
 
     def send_discord_notification(self, token_data):
         """Discordに通知を送信（重複チェック付き）"""
