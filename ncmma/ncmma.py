@@ -13,6 +13,7 @@ import sys
 import os
 import math
 import hashlib
+import re
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -55,26 +56,36 @@ class CmmaPriceMonitor:
         return raw
 
     @staticmethod
-    def _get_env_int(key, default):
-        """環境変数をintへ変換する。設定ミス・不正値はデフォルト値へフォールバック。"""
+    def _get_env_int(key, default, minimum=None, maximum=None):
+        """環境変数を検証済みのintへ変換する。明示された不正値は起動を止める。"""
         raw = os.getenv(key)
         if raw is None or raw.strip() == '':
             return default
         try:
-            return int(raw)
-        except (TypeError, ValueError):
-            return default
+            value = int(raw.strip())
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{key} must be an integer") from exc
+        if minimum is not None and value < minimum:
+            raise ValueError(f"{key} must be >= {minimum}")
+        if maximum is not None and value > maximum:
+            raise ValueError(f"{key} must be <= {maximum}")
+        return value
 
     @staticmethod
-    def _get_env_float(key, default):
-        """環境変数をfloatへ変換する。設定ミス・不正値はデフォルト値へフォールバック。"""
+    def _get_env_float(key, default, minimum=None):
+        """環境変数を有限値のfloatへ変換する。明示された不正値は起動を止める。"""
         raw = os.getenv(key)
         if raw is None or raw.strip() == '':
             return default
         try:
-            return float(raw)
-        except (TypeError, ValueError):
-            return default
+            value = float(raw.strip())
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{key} must be a number") from exc
+        if not math.isfinite(value):
+            raise ValueError(f"{key} must be finite")
+        if minimum is not None and value < minimum:
+            raise ValueError(f"{key} must be >= {minimum}")
+        return value
 
     def _load_config(self):
         """設定ファイルの読み込み"""
@@ -88,27 +99,31 @@ class CmmaPriceMonitor:
         
         # APIクエリパラメータ
         self.timeframe = self._get_env('TIMEFRAME', '4h')
-        self.threshold = self._get_env_float('THRESHOLD', 5.0)
+        self.threshold = self._get_env_float('THRESHOLD', 5.0, minimum=0.0)
+        if self.threshold <= 0:
+            raise ValueError("THRESHOLD must be > 0")
         self.direction = self._get_env('DIRECTION', 'up')
+        if self.direction not in {'up', 'down', 'both'}:
+            raise ValueError("DIRECTION must be one of: up, down, both")
         self.volatility_sort = self._get_env('CMMA_VOLATILITY_API_SORT', 'volatility_desc')
-        self.volatility_limit = self._get_env_int('CMMA_VOLATILITY_API_LIMIT', 100)
-        self.offset = self._get_env_int('OFFSET', 5)
+        self.volatility_limit = self._get_env_int('CMMA_VOLATILITY_API_LIMIT', 100, minimum=1, maximum=100)
+        self.offset = self._get_env_int('OFFSET', 5, minimum=0)
 
         # 監視設定
-        self.max_notifications = self._get_env_int('MAX_NOTIFICATIONS', 20)
-        self.renotify_buffer_minutes = self._get_env_int('RENOTIFY_BUFFER_MINUTES', 60)
-        self.check_interval_seconds = self._get_env_int('CHECK_INTERVAL_SECONDS', 300)
+        self.max_notifications = self._get_env_int('MAX_NOTIFICATIONS', 20, minimum=1, maximum=25)
+        self.renotify_buffer_minutes = self._get_env_int('RENOTIFY_BUFFER_MINUTES', 60, minimum=0)
+        self.check_interval_seconds = self._get_env_int('CHECK_INTERVAL_SECONDS', 300, minimum=1)
         
         # ログ設定
-        self.log_max_size_mb = self._get_env_int('LOG_MAX_SIZE_MB', 10)
+        self.log_max_size_mb = self._get_env_int('LOG_MAX_SIZE_MB', 10, minimum=1)
 
         # 出来高フィルター設定
         self.volume_api_url = self._get_env('CMMA_VOLUME_API_URL', 'https://stg.api.1btc.love/volume')
-        self.volume_threshold = self._get_env_float('VOLUME_THRESHOLD', 0.0)
+        self.volume_threshold = self._get_env_float('VOLUME_THRESHOLD', 0.0, minimum=0.0)
         self.volume_timeframe = self._get_env('VOLUME_TIMEFRAME', '1h')
         self.volume_period = self._get_env('VOLUME_PERIOD', '24h')
         self.volume_sort = self._get_env('CMMA_VOLUME_API_SORT', 'turnover_desc')
-        self.volume_limit = self._get_env_int('CMMA_VOLUME_API_LIMIT', 100)
+        self.volume_limit = self._get_env_int('CMMA_VOLUME_API_LIMIT', 100, minimum=1, maximum=100)
 
     def _init_db(self):
         """データベースの初期化"""
@@ -187,7 +202,10 @@ class CmmaPriceMonitor:
         """自前命名規則に一致するファイルかを判定する。
         削除対象は ncmma_monitor.log (ローテーションを含む) と results_*.json に限定する。"""
         name = file_path.name
-        return name.startswith('ncmma_monitor.log') or name.startswith('results_')
+        return bool(
+            re.fullmatch(r'ncmma_monitor\.log(?:\.\d+)?', name)
+            or re.fullmatch(r'results_.+\.json', name)
+        )
 
     def _cleanup_logs(self):
         """ログディレクトリの自動削除（10MB以上）。削除対象は自前命名規則のファイルのみ。"""
@@ -199,8 +217,8 @@ class CmmaPriceMonitor:
             for file_path in self.log_dir.rglob('*'):
                 if file_path.is_file():
                     size = file_path.stat().st_size
-                    total_size += size
                     if self._is_managed_log(file_path):
+                        total_size += size
                         log_files.append((file_path, size, file_path.stat().st_mtime))
             
             total_size_mb = total_size / (1024 * 1024)
@@ -266,9 +284,9 @@ class CmmaPriceMonitor:
                         # self.logger.debug(f"Skipping hash {notification_hash[:8]}...: {remaining_minutes:.1f}min remaining")
                         return False
                 return True
-        except sqlite3.Error as e:
+        except (sqlite3.Error, ValueError, TypeError) as e:
             self.logger.error(f"Failed to check notification history from DB: {e}")
-            return False # DBエラー時は通知しない
+            return True # 履歴を読めない場合は金融アラートを抑止しない
 
     def _record_notification(self, notification_hash, symbol, timeframe, direction, change_pct):
         """通知履歴をDBに記録"""
@@ -302,12 +320,20 @@ class CmmaPriceMonitor:
             if not isinstance(data, dict):
                 self.logger.warning("API returned a non-object response.")
                 return []
-            if 'data' in data and data.get('count', 0) > 0:
-                self.logger.info(f"Successfully fetched {data.get('count')} records from CMMA API.")
-                return data['data']
-            elif 'error' in data:
+            if 'error' in data:
                 self.logger.error(f"API Error from CMMA: {data['error']}")
                 return []
+            records = data.get('data')
+            count = data.get('count', 0)
+            if not isinstance(records, list) or not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                self.logger.error("CMMA API returned malformed data payload")
+                return []
+            if count > 0:
+                self.logger.info(f"Successfully fetched {count} records from CMMA API.")
+                return records
+            if records:
+                self.logger.warning("CMMA API returned records with count=0")
+                return records
             else:
                 self.logger.info("No significant moves found from CMMA API.")
                 return []
@@ -344,16 +370,20 @@ class CmmaPriceMonitor:
             if not isinstance(data, dict):
                 self.logger.warning("Volume API returned a non-object response.")
                 return {}
+            if 'error' in data:
+                self.logger.error(f"API Error from CMMA volume endpoint: {data['error']}")
+                return {}
+            records = data.get('data')
+            if not isinstance(records, list):
+                self.logger.error("CMMA volume API returned malformed data payload")
+                return {}
             if 'data' in data:
-                self.logger.info(f"Successfully fetched {len(data['data'])} high volume symbols.")
+                self.logger.info(f"Successfully fetched {len(records)} high volume symbols.")
                 result = {}
-                for item in data['data']:
+                for item in records:
                     if isinstance(item, dict) and item.get('symbol'):
                         result[item['symbol']] = item
                 return result
-            elif 'error' in data:
-                self.logger.error(f"API Error from CMMA volume endpoint: {data['error']}")
-                return {}
             else:
                 self.logger.info("No high volume data found from CMMA API.")
                 return {}
@@ -384,12 +414,9 @@ class CmmaPriceMonitor:
 
         suffixes = ['', 'K', 'M', 'B', 'T']
         magnitude = 0
-        while abs(num) >= 1000:
+        while abs(num) >= 1000 and magnitude < len(suffixes) - 1:
             magnitude += 1
             num /= 1000.0
-
-        # 巨大値でmagnitudeがリストの範囲を超えないようクランプ
-        magnitude = min(magnitude, len(suffixes) - 1)
 
         return f"{num:.2f}{suffixes[magnitude]}$"
 
@@ -407,6 +434,8 @@ class CmmaPriceMonitor:
         try:
             pct = float(change.get('pct'))
         except (TypeError, ValueError):
+            return None
+        if not math.isfinite(pct):
             return None
         return (pct, direction)
 
@@ -474,7 +503,8 @@ class CmmaPriceMonitor:
             formatted_vol_threshold = self._format_currency(self.volume_threshold)
             embed["footer"]["text"] += f" | 出来高(Turnover)({self.volume_period}): >{formatted_vol_threshold}"
 
-        for token, _ in limited_tokens_with_hash:
+        sent_tokens_with_hash = []
+        for token, notification_hash in limited_tokens_with_hash:
             change = self._extract_change(token)
             if change is None:
                 continue
@@ -487,6 +517,9 @@ class CmmaPriceMonitor:
                 prev_close = float(price.get('prev_close'))
             except (TypeError, ValueError):
                 self.logger.warning("Skipping token with invalid price data: %s", token)
+                continue
+            if not math.isfinite(close) or not math.isfinite(prev_close):
+                self.logger.warning("Skipping token with non-finite price data: %s", token)
                 continue
             direction_char = "📈" if direction == 'up' else "📉"
             sign = "+" if direction == 'up' else ""
@@ -501,12 +534,21 @@ class CmmaPriceMonitor:
                 "value": value,
                 "inline": True
             })
+            sent_tokens_with_hash.append((token, notification_hash, change_pct, direction))
+
+        if not sent_tokens_with_hash:
+            self.logger.warning("No tokens with valid price data remained for notification")
+            return False
+        embed["description"] = (
+            f"{len(sent_tokens_with_hash)}個のトークンが{self.timeframe}足で"
+            f"{self.threshold}%以上の{title_direction}を検知！"
+        )
         
         # 表示制限による省略がある場合
-        if len(filtered_tokens) > self.max_notifications:
+        if len(filtered_tokens) > len(sent_tokens_with_hash):
             embed["fields"].append({
                 "name": "その他",
-                "value": f"さらに{len(filtered_tokens) - self.max_notifications}個のトークンが条件を満たしています...",
+                "value": f"さらに{len(filtered_tokens) - len(sent_tokens_with_hash)}個のトークンが条件を満たしています...",
                 "inline": False
             })
         
@@ -522,14 +564,10 @@ class CmmaPriceMonitor:
         try:
             response = requests.post(self.discord_webhook_url, json=payload, timeout=30)
             response.raise_for_status()
-            self.logger.info(f"Discord notification sent: {len(limited_tokens_with_hash)} tokens.")
+            self.logger.info(f"Discord notification sent: {len(sent_tokens_with_hash)} tokens.")
 
             # 通知が成功したトークンの履歴をDBに記録
-            for token, notification_hash in limited_tokens_with_hash:
-                change = self._extract_change(token)
-                if change is None:
-                    continue
-                change_pct, direction = change
+            for token, notification_hash, change_pct, direction in sent_tokens_with_hash:
                 self._record_notification(
                     notification_hash,
                     token.get('symbol', ''),
@@ -537,7 +575,7 @@ class CmmaPriceMonitor:
                     direction,
                     change_pct
                 )
-            self.logger.info(f"Recorded {len(limited_tokens_with_hash)} notifications to database.")
+            self.logger.info(f"Recorded {len(sent_tokens_with_hash)} notifications to database.")
             return True
 
         except requests.exceptions.RequestException as e:
@@ -571,8 +609,8 @@ class CmmaPriceMonitor:
             for file_path in self.log_dir.rglob('*'):
                 if not file_path.is_file():
                     continue
-                total_size += file_path.stat().st_size
                 if self._is_managed_log(file_path):
+                    total_size += file_path.stat().st_size
                     deletable_files.append(file_path)
             total_size_mb = total_size / (1024 * 1024)
             
@@ -591,6 +629,8 @@ class CmmaPriceMonitor:
                 
                 deleted_size = 0
                 for file_path, mtime, size in files_by_age:
+                    if file_path.name == 'ncmma_monitor.log':
+                        continue
                     try:
                         file_path.unlink()
                         deleted_size += size
