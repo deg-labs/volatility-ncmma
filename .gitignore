@@ -3,3 +3,7 @@ cache
 .env
 *.db
 
+
+# Python test and runtime caches
+__pycache__/
+.pytest_cache/
