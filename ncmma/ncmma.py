@@ -782,9 +782,12 @@ class CmmaPriceMonitor:
                 "No tokens with valid price data remained for notification"
             )
             return False
+        symbols = ", ".join(
+            token["symbol"] for token, _, _, _ in sent_tokens_with_hash
+        )
         embed["description"] = (
             f"{len(sent_tokens_with_hash)}個のトークンが{self.timeframe}足で"
-            f"{self.threshold}%以上の{title_direction}を検知！"
+            f"{self.threshold}%以上の{title_direction}を検知！ {symbols}"
         )
 
         # 表示制限による省略がある場合
