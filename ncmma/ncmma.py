@@ -1008,7 +1008,7 @@ class CmmaPriceMonitor:
         if significant_moves:
             notification_sent = self.send_discord_notification(significant_moves)
             if not notification_sent:
-                self.logger.warning(
+                self.logger.info(
                     "Discord notification failed or all tokens were filtered"
                 )
         else:
